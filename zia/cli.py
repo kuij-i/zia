@@ -181,6 +181,12 @@ def backtest(
     commission: float = typer.Option(
         0.0, "--commission", min=0, help="Account currency per 100k units, per side"
     ),
+    swap_long: float = typer.Option(
+        0.0, "--swap-long", help="Annual % of notional for longs (negative = you pay)"
+    ),
+    swap_short: float = typer.Option(
+        0.0, "--swap-short", help="Annual % of notional for shorts (negative = you pay)"
+    ),
     llm: bool = typer.Option(False, "--llm", help="Call the LLM reviewer for every signal"),
 ) -> None:
     """Backtest the strategy + Risk Governor on historical candles (no LLM by default)."""
@@ -241,6 +247,8 @@ def backtest(
         spread_pips=spread_pips,
         slippage_pips=slippage_pips,
         commission_per_100k=commission,
+        swap_long_pct=swap_long,
+        swap_short_pct=swap_short,
         step=timedelta(seconds=GRANULARITY_SECONDS[settings.timeframe]),
         timeframe=settings.timeframe,
         reviewer=reviewer,

@@ -126,3 +126,12 @@ def test_backtest_cost_options():
 def test_backtest_rejects_negative_costs():
     res = runner.invoke(cli.app, ["backtest", "--synthetic", "300", "--commission", "-1"])
     assert res.exit_code != 0
+
+
+def test_backtest_swap_options():
+    res = runner.invoke(
+        cli.app,
+        ["backtest", "--synthetic", "1200", "--swap-long", "-2.5", "--swap-short", "0.8"],
+    )
+    assert res.exit_code == 0, res.output
+    assert "long -2.5% / short +0.8%" in res.output

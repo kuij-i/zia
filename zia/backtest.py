@@ -3,7 +3,8 @@ Risk Governor, executing on the SimBroker.
 
 Assumptions (explicit): fills at candle close +/- half a fixed spread; a fixed slippage
 in pips against the trader on entries and stop-loss exits (take-profits fill at their
-limit price); commission per 100k units on each side; no financing/swap; stop-loss
+limit price); commission per 100k units on each side; swap/financing at annual long/short
+rates applied at each 17:00 New York rollover (Wednesday x3, none at weekends); stop-loss
 assumed to fill before take-profit when both are touched within one candle; open trades
 are marked to the final close (exit costs not yet charged). Position sizing ignores these
 costs, exactly as in live trading. Results are hypothetical and say nothing about future
@@ -44,6 +45,9 @@ class BacktestResult:
     commission_per_100k: float
     total_commission: float
     total_slippage: float
+    swap_long_pct: float
+    swap_short_pct: float
+    total_swap: float
     llm_used: bool
     signals: int
     risk_rejections: int
@@ -77,7 +81,13 @@ class BacktestResult:
             ("Commission", f"{self.commission_per_100k:,.2f} per 100k units per side"),
             ("Commission paid", f"{self.total_commission:,.2f}"),
             ("Slippage cost", f"{self.total_slippage:,.2f}"),
-            ("Not modelled", "swap/financing, gaps through stops"),
+            (
+                "Swap/financing",
+                f"long {self.swap_long_pct:+g}% / short {self.swap_short_pct:+g}% p.a., "
+                "17:00 New York rollover, Wed x3",
+            ),
+            ("Swap earned (+) / paid (-)", f"{self.total_swap:+,.2f}"),
+            ("Not modelled", "gaps through stops, financing-rate changes"),
             ("LLM review", "on" if self.llm_used else "off"),
             ("Open at end (marked to close)", str(self.open_at_end)),
         ]
@@ -93,6 +103,8 @@ def run_backtest(
     spread_pips: float = 1.0,
     slippage_pips: float = 0.0,
     commission_per_100k: float = 0.0,
+    swap_long_pct: float = 0.0,
+    swap_short_pct: float = 0.0,
     step: timedelta = timedelta(hours=1),
     timeframe: str = "H1",
     reviewer: Reviewer | None = None,
@@ -110,6 +122,8 @@ def run_backtest(
         step=step,
         slippage_pips=slippage_pips,
         commission_per_100k=commission_per_100k,
+        swap_long_pct=swap_long_pct,
+        swap_short_pct=swap_short_pct,
     )
     # Sim prices are stamped at the simulated "now", so freshness is exact by construction.
     agent = Agent(
@@ -164,6 +178,9 @@ def run_backtest(
         commission_per_100k=commission_per_100k,
         total_commission=sum(t.commission for t in sim.trades),
         total_slippage=sum(t.slippage_cost for t in sim.trades),
+        swap_long_pct=swap_long_pct,
+        swap_short_pct=swap_short_pct,
+        total_swap=sum(t.swap for t in sim.trades),
         llm_used=llm_used,
         signals=signals,
         risk_rejections=rejections,
