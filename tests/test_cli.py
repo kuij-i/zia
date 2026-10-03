@@ -111,3 +111,18 @@ def test_backtest_synthetic(monkeypatch):
 def test_backtest_requires_source():
     res = runner.invoke(cli.app, ["backtest"])
     assert res.exit_code == 2
+
+
+def test_backtest_cost_options():
+    res = runner.invoke(
+        cli.app,
+        ["backtest", "--synthetic", "1200", "--slippage-pips", "0.5", "--commission", "3.5"],
+    )
+    assert res.exit_code == 0, res.output
+    assert "0.5 pips on entries" in res.output
+    assert "3.50 per 100k" in res.output
+
+
+def test_backtest_rejects_negative_costs():
+    res = runner.invoke(cli.app, ["backtest", "--synthetic", "300", "--commission", "-1"])
+    assert res.exit_code != 0
