@@ -1,10 +1,13 @@
 """Offline backtest: replays historical candles through the *same* Agent, strategy and
 Risk Governor, executing on the SimBroker.
 
-Assumptions (explicit): fills at candle close +/- half a fixed spread; no slippage,
-financing/swap or commission; stop-loss assumed to fill before take-profit when both are
-touched within one candle; open trades are marked to the final close. Results are
-hypothetical and say nothing about future performance.
+Assumptions (explicit): fills at candle close +/- half a fixed spread; a fixed slippage
+in pips against the trader on entries and stop-loss exits (take-profits fill at their
+limit price); commission per 100k units on each side; no financing/swap; stop-loss
+assumed to fill before take-profit when both are touched within one candle; open trades
+are marked to the final close (exit costs not yet charged). Position sizing ignores these
+costs, exactly as in live trading. Results are hypothetical and say nothing about future
+performance.
 """
 
 from __future__ import annotations
@@ -37,6 +40,10 @@ class BacktestResult:
     starting_balance: float
     ending_equity: float
     spread_pips: float
+    slippage_pips: float
+    commission_per_100k: float
+    total_commission: float
+    total_slippage: float
     llm_used: bool
     signals: int
     risk_rejections: int
@@ -65,7 +72,12 @@ class BacktestResult:
                 "Start balance / end equity",
                 f"{self.starting_balance:,.2f} / {self.ending_equity:,.2f}",
             ),
-            ("Spread assumption", f"{self.spread_pips} pips, no slippage/swap/commission"),
+            ("Spread", f"{self.spread_pips:g} pips"),
+            ("Slippage", f"{self.slippage_pips:g} pips on entries and stop-loss exits"),
+            ("Commission", f"{self.commission_per_100k:,.2f} per 100k units per side"),
+            ("Commission paid", f"{self.total_commission:,.2f}"),
+            ("Slippage cost", f"{self.total_slippage:,.2f}"),
+            ("Not modelled", "swap/financing, gaps through stops"),
             ("LLM review", "on" if self.llm_used else "off"),
             ("Open at end (marked to close)", str(self.open_at_end)),
         ]
@@ -79,6 +91,8 @@ def run_backtest(
     limits: RiskLimits,
     balance: float = 10_000.0,
     spread_pips: float = 1.0,
+    slippage_pips: float = 0.0,
+    commission_per_100k: float = 0.0,
     step: timedelta = timedelta(hours=1),
     timeframe: str = "H1",
     reviewer: Reviewer | None = None,
@@ -89,7 +103,14 @@ def run_backtest(
     if not llm_used:
         limits = replace(limits, require_llm_approval=False)
     journal = journal or Journal(":memory:")
-    sim = SimBroker({instrument: candles}, balance=balance, spread_pips=spread_pips, step=step)
+    sim = SimBroker(
+        {instrument: candles},
+        balance=balance,
+        spread_pips=spread_pips,
+        step=step,
+        slippage_pips=slippage_pips,
+        commission_per_100k=commission_per_100k,
+    )
     # Sim prices are stamped at the simulated "now", so freshness is exact by construction.
     agent = Agent(
         broker=sim,
@@ -139,6 +160,10 @@ def run_backtest(
         starting_balance=balance,
         ending_equity=ending,
         spread_pips=spread_pips,
+        slippage_pips=slippage_pips,
+        commission_per_100k=commission_per_100k,
+        total_commission=sum(t.commission for t in sim.trades),
+        total_slippage=sum(t.slippage_cost for t in sim.trades),
         llm_used=llm_used,
         signals=signals,
         risk_rejections=rejections,

@@ -2,8 +2,14 @@
 
 Fills market orders at the candle close +/- half the configured spread, and closes trades
 when a later candle's range touches stop-loss or take-profit. If both are touched in the
-same candle the stop-loss is assumed to hit first (conservative). No slippage, swaps or
-commissions beyond the spread are modelled.
+same candle the stop-loss is assumed to hit first (conservative).
+
+Costs:
+- Spread: buys fill at the ask, sells at the bid; exits trigger on the opposite side.
+- Slippage: a fixed number of pips *against* the trader on market fills (entries, manual
+  closes) and stop-loss exits. Take-profit exits are limit orders and fill at their price.
+- Commission: charged per 100k units on each side (entry and exit), in account currency.
+Swap/financing and gaps through stops are not modelled.
 """
 
 from __future__ import annotations
@@ -40,8 +46,10 @@ class SimTrade:
     open_time: datetime
     close_price: float | None = None
     close_time: datetime | None = None
-    realized_pl: float = 0.0
+    realized_pl: float = 0.0  # net of commission and slippage
     exit_reason: str | None = None
+    commission: float = 0.0  # entry + exit, account currency
+    slippage_cost: float = 0.0  # entry + exit, account currency
 
     @property
     def is_open(self) -> bool:
@@ -63,7 +71,11 @@ class SimBroker(Broker):
         margin_rate: float = 0.0333,
         environment: TradingEnvironment = TradingEnvironment.BACKTEST,
         step: timedelta = timedelta(hours=1),
+        slippage_pips: float = 0.0,
+        commission_per_100k: float = 0.0,
     ) -> None:
+        if slippage_pips < 0 or commission_per_100k < 0:
+            raise ValueError("slippage and commission must be non-negative")
         self.environment = environment
         self.step = step  # candle duration: a candle opened at T is complete at T + step
         self._candles = {k: sorted(v, key=lambda c: c.time) for k, v in candles.items()}
@@ -72,6 +84,8 @@ class SimBroker(Broker):
         self.currency = currency
         self._spread = spread_pips
         self.margin_rate = margin_rate
+        self.slippage_pips = slippage_pips
+        self.commission_per_100k = commission_per_100k
         self.trades: list[SimTrade] = []
         self._ids = itertools.count(1)
         self.fail_next_order: str | None = None  # inject a broker failure in tests
@@ -96,6 +110,12 @@ class SimBroker(Broker):
         if isinstance(self._spread, dict):
             return self._spread.get(instrument, 1.0)
         return self._spread
+
+    def _slip(self, instrument: str) -> float:
+        return self.slippage_pips * inst.pip_size(instrument)
+
+    def _commission(self, units: int) -> float:
+        return units / 100_000 * self.commission_per_100k
 
     # -- Broker API -----------------------------------------------------------------------
     def get_candles(self, instrument: str, granularity: str, count: int) -> list[Candle]:
@@ -158,7 +178,8 @@ class SimBroker(Broker):
             msg, self.fail_next_order = self.fail_next_order, None
             raise BrokerError(msg)
         price = self.get_price(order.instrument)
-        fill = price.ask if order.side is Side.BUY else price.bid
+        slip = self._slip(order.instrument)
+        fill = price.ask + slip if order.side is Side.BUY else price.bid - slip
         # Re-check protection against the actual fill.
         if order.side is Side.BUY and not order.stop_loss < fill < order.take_profit:
             return ExecutionResult(
@@ -178,6 +199,9 @@ class SimBroker(Broker):
             take_profit=order.take_profit,
             open_time=self.now or price.time,
         )
+        trade.commission = self._commission(order.units)
+        trade.slippage_cost = self._to_account(order.instrument, slip * order.units, fill)
+        self.balance -= trade.commission
         self.trades.append(trade)
         return ExecutionResult(
             "filled",
@@ -198,7 +222,7 @@ class SimBroker(Broker):
         price = self.get_price(instrument)
         for t in open_trades:
             px = price.bid if t.side is Side.BUY else price.ask
-            self._close(t, px, self.now or price.time, "manual")
+            self._close(t, px, self.now or price.time, "manual", slipped=True)
         return ExecutionResult(
             "filled", instrument, units_filled=0.0, raw={"closed": len(open_trades)}
         )
@@ -226,17 +250,28 @@ class SimBroker(Broker):
             if t.side is Side.BUY:
                 # Long exits on the bid.
                 if bar.low - half <= t.stop_loss:
-                    self._close(t, t.stop_loss, bar.time, "stop_loss")
+                    self._close(t, t.stop_loss, bar.time, "stop_loss", slipped=True)
                 elif bar.high - half >= t.take_profit:
                     self._close(t, t.take_profit, bar.time, "take_profit")
             else:
                 # Short exits on the ask.
                 if bar.high + half >= t.stop_loss:
-                    self._close(t, t.stop_loss, bar.time, "stop_loss")
+                    self._close(t, t.stop_loss, bar.time, "stop_loss", slipped=True)
                 elif bar.low + half <= t.take_profit:
                     self._close(t, t.take_profit, bar.time, "take_profit")
 
-    def _close(self, t: SimTrade, price: float, when: datetime, reason: str) -> None:
-        pnl = self._to_account(t.instrument, (price - t.open_price) * t.signed_units, price)
-        t.close_price, t.close_time, t.realized_pl, t.exit_reason = price, when, pnl, reason
-        self.balance += pnl
+    def _close(
+        self, t: SimTrade, price: float, when: datetime, reason: str, *, slipped: bool = False
+    ) -> None:
+        """Close at ``price``; market-style exits (stops, manual) also suffer slippage."""
+        if slipped:
+            slip = self._slip(t.instrument)
+            price = price - slip if t.side is Side.BUY else price + slip
+            t.slippage_cost += self._to_account(t.instrument, slip * t.units, price)
+        gross = self._to_account(t.instrument, (price - t.open_price) * t.signed_units, price)
+        exit_commission = self._commission(t.units)
+        t.commission += exit_commission
+        # Entry commission was already taken from the balance when the trade opened.
+        self.balance += gross - exit_commission
+        t.close_price, t.close_time, t.exit_reason = price, when, reason
+        t.realized_pl = gross - t.commission

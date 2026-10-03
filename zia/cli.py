@@ -174,7 +174,13 @@ def backtest(
     ),
     seed: int = typer.Option(7, "--seed"),
     balance: float = typer.Option(10_000.0, "--balance"),
-    spread_pips: float = typer.Option(1.0, "--spread-pips"),
+    spread_pips: float = typer.Option(1.0, "--spread-pips", min=0),
+    slippage_pips: float = typer.Option(
+        0.2, "--slippage-pips", min=0, help="Adverse pips on entries and stop-loss exits"
+    ),
+    commission: float = typer.Option(
+        0.0, "--commission", min=0, help="Account currency per 100k units, per side"
+    ),
     llm: bool = typer.Option(False, "--llm", help="Call the LLM reviewer for every signal"),
 ) -> None:
     """Backtest the strategy + Risk Governor on historical candles (no LLM by default)."""
@@ -233,6 +239,8 @@ def backtest(
         limits=RiskLimits.from_settings(settings, require_llm_approval=llm),
         balance=balance,
         spread_pips=spread_pips,
+        slippage_pips=slippage_pips,
+        commission_per_100k=commission,
         step=timedelta(seconds=GRANULARITY_SECONDS[settings.timeframe]),
         timeframe=settings.timeframe,
         reviewer=reviewer,
