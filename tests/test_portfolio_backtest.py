@@ -160,3 +160,27 @@ def test_cli_rejects_bad_pair_arguments(args, tmp_path):
     (tmp_path / "a.csv").write_text("time,open,high,low,close\n")
     res = runner.invoke(cli.app, ["backtest", *args])
     assert res.exit_code == 2, res.output
+
+
+def test_cli_bare_csv_path_containing_equals(tmp_path):
+    odd = tmp_path / "run=1"
+    odd.mkdir()
+    eur = write_csv(odd / "eur.csv", PAIRS["EUR_USD"][:600])
+    res = runner.invoke(cli.app, ["backtest", "--pair", "EUR_USD", "--csv", str(eur)])
+    assert res.exit_code == 0, res.output
+
+
+def test_parse_csv_args_validates_pair_names():
+    with pytest.raises(ValueError):
+        cli._parse_csv_args(["EUR_XYZ1=a.csv", "USD_JPY=b.csv"], ["EUR_USD", "USD_JPY"])
+    assert cli._parse_csv_args(["eur_usd=a=b.csv"], ["EUR_USD"]) == {"EUR_USD": cli.Path("a=b.csv")}
+    # Left side isn't a pair name: with several pairs this is an error, not a pair "DATA/X".
+    with pytest.raises(ValueError):
+        cli._parse_csv_args(["data/x=1.csv", "USD_JPY=b.csv"], ["EUR_USD", "USD_JPY"])
+
+
+def test_run_backtest_rejects_unknown_options():
+    with pytest.raises(TypeError):
+        run_backtest(
+            "EUR_USD", PAIRS["EUR_USD"], params=StrategyParams(), limits=RiskLimits(), bogus=1
+        )

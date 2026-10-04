@@ -178,12 +178,21 @@ def _parse_pairs(pair: str, pairs: str | None) -> list[str]:
 
 
 def _parse_csv_args(csv: list[str], pairs: list[str]) -> dict[str, Path]:
-    """Map pairs to CSV paths from repeated ``--csv PAIR=PATH`` (or one bare PATH)."""
+    """Map pairs to CSV paths from repeated ``--csv PAIR=PATH`` (or one bare PATH).
+
+    ``PAIR=`` is only recognised when the text before ``=`` is a pair name such as
+    ``EUR_USD``, so a bare path that happens to contain ``=`` stays a path.
+    """
+    import re
+
+    from zia import instruments as inst
+
     out: dict[str, Path] = {}
     for item in csv:
-        if "=" in item:
-            name, path = item.split("=", 1)
-            name = name.strip().upper()
+        head, sep, tail = item.partition("=")
+        if sep and re.fullmatch(r"[A-Za-z]{3}_[A-Za-z]{3}", head.strip()):
+            name, path = head.strip().upper(), tail
+            inst.split(name)
         elif len(csv) == 1 and len(pairs) == 1:
             name, path = pairs[0], item
         else:

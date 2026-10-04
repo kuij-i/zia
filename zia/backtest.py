@@ -133,9 +133,41 @@ class BacktestResult:
         ]
 
 
-def run_backtest(instrument: str, candles: list[Candle], **kwargs) -> BacktestResult:
-    """Backtest a single pair. See ``run_portfolio_backtest`` for the options."""
-    return run_portfolio_backtest({instrument: candles}, **kwargs)
+def run_backtest(
+    instrument: str,
+    candles: list[Candle],
+    *,
+    params: StrategyParams,
+    limits: RiskLimits,
+    balance: float = 10_000.0,
+    spread_pips: float = 1.0,
+    slippage_pips: float = 0.0,
+    commission_per_100k: float = 0.0,
+    swap_long_pct: float = 0.0,
+    swap_short_pct: float = 0.0,
+    step: timedelta = timedelta(hours=1),
+    timeframe: str = "H1",
+    reviewer: Reviewer | None = None,
+    journal: Journal | None = None,
+    trade_from: datetime | None = None,
+) -> BacktestResult:
+    """Backtest a single pair: a portfolio of one (see ``run_portfolio_backtest``)."""
+    return run_portfolio_backtest(
+        {instrument: candles},
+        params=params,
+        limits=limits,
+        balance=balance,
+        spread_pips=spread_pips,
+        slippage_pips=slippage_pips,
+        commission_per_100k=commission_per_100k,
+        swap_long_pct=swap_long_pct,
+        swap_short_pct=swap_short_pct,
+        step=step,
+        timeframe=timeframe,
+        reviewer=reviewer,
+        journal=journal,
+        trade_from=trade_from,
+    )
 
 
 def run_portfolio_backtest(
