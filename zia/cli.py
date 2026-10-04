@@ -194,52 +194,20 @@ def _parse_csv_args(csv: list[str], pairs: list[str]) -> dict[str, Path]:
     return out
 
 
-@app.command()
-def backtest(
-    pair: str = typer.Option("EUR_USD", "--pair", help="Single pair to backtest"),
-    pairs: str | None = typer.Option(
-        None, "--pairs", help="Comma-separated pairs sharing one account, e.g. EUR_USD,USD_JPY"
-    ),
-    start: str | None = typer.Option(None, "--from", help="Start date YYYY-MM-DD (OANDA data)"),
-    end: str | None = typer.Option(None, "--to", help="End date YYYY-MM-DD"),
-    csv: list[str] | None = typer.Option(
-        None, "--csv", help="CSV (time,open,high,low,close) as PAIR=PATH; repeat per pair"
-    ),
-    synthetic: int = typer.Option(
-        0, "--synthetic", help="Use N seeded random-walk candles (demo only, not market data)"
-    ),
-    seed: int = typer.Option(7, "--seed"),
-    balance: float = typer.Option(10_000.0, "--balance"),
-    spread_pips: float = typer.Option(1.0, "--spread-pips", min=0),
-    slippage_pips: float = typer.Option(
-        0.2, "--slippage-pips", min=0, help="Adverse pips on entries and stop-loss exits"
-    ),
-    commission: float = typer.Option(
-        0.0, "--commission", min=0, help="Account currency per 100k units, per side"
-    ),
-    swap_long: float = typer.Option(
-        0.0, "--swap-long", help="Annual % of notional for longs (negative = you pay)"
-    ),
-    swap_short: float = typer.Option(
-        0.0, "--swap-short", help="Annual % of notional for shorts (negative = you pay)"
-    ),
-    llm: bool = typer.Option(False, "--llm", help="Call the LLM reviewer for every signal"),
-) -> None:
-    """Backtest the strategy + Risk Governor on historical candles (no LLM by default).
-
-    Several pairs (--pairs, or repeated --csv PAIR=PATH) trade one shared account, so
-    the Risk Governor's limits apply across the portfolio exactly as in ``zia run``.
-    """
+def _load_candles(
+    settings: Settings,
+    pair: str,
+    pairs: str | None,
+    start: str | None,
+    end: str | None,
+    csv: list[str] | None,
+    synthetic: int,
+    seed: int,
+    mode: str,
+) -> tuple[dict[str, list], str]:
+    """Load candles per pair from --synthetic, --csv or OANDA (--from). Exits on errors."""
     from zia import data
-    from zia.backtest import run_portfolio_backtest
-    from zia.risk import RiskLimits
 
-    try:
-        settings = load_settings()
-    except ValueError as exc:
-        console.print(f"[bold red]Configuration refused:[/] {exc}")
-        raise typer.Exit(2) from exc
-    setup_logging("WARNING", settings.log_json, settings.secret_values())
     try:
         pair_list = _parse_pairs(pair, pairs)
         csv_paths = _parse_csv_args(csv or [], pair_list)
@@ -248,7 +216,7 @@ def backtest(
         raise typer.Exit(2) from exc
     if csv_paths and pairs is None:
         pair_list = list(csv_paths)  # the CSV arguments name the pairs
-    console.print("[bold black on cyan] MODE: BACKTEST (simulated, hypothetical) [/]")
+    console.print(f"[bold black on cyan] MODE: {mode} (simulated, hypothetical) [/]")
 
     candles_by_pair: dict[str, list] = {}
     if synthetic:
@@ -293,6 +261,57 @@ def backtest(
     if empty:
         console.print(f"No candles loaded for {', '.join(empty)}.")
         raise typer.Exit(1)
+    return candles_by_pair, source
+
+
+@app.command()
+def backtest(
+    pair: str = typer.Option("EUR_USD", "--pair", help="Single pair to backtest"),
+    pairs: str | None = typer.Option(
+        None, "--pairs", help="Comma-separated pairs sharing one account, e.g. EUR_USD,USD_JPY"
+    ),
+    start: str | None = typer.Option(None, "--from", help="Start date YYYY-MM-DD (OANDA data)"),
+    end: str | None = typer.Option(None, "--to", help="End date YYYY-MM-DD"),
+    csv: list[str] | None = typer.Option(
+        None, "--csv", help="CSV (time,open,high,low,close) as PAIR=PATH; repeat per pair"
+    ),
+    synthetic: int = typer.Option(
+        0, "--synthetic", help="Use N seeded random-walk candles (demo only, not market data)"
+    ),
+    seed: int = typer.Option(7, "--seed"),
+    balance: float = typer.Option(10_000.0, "--balance"),
+    spread_pips: float = typer.Option(1.0, "--spread-pips", min=0),
+    slippage_pips: float = typer.Option(
+        0.2, "--slippage-pips", min=0, help="Adverse pips on entries and stop-loss exits"
+    ),
+    commission: float = typer.Option(
+        0.0, "--commission", min=0, help="Account currency per 100k units, per side"
+    ),
+    swap_long: float = typer.Option(
+        0.0, "--swap-long", help="Annual % of notional for longs (negative = you pay)"
+    ),
+    swap_short: float = typer.Option(
+        0.0, "--swap-short", help="Annual % of notional for shorts (negative = you pay)"
+    ),
+    llm: bool = typer.Option(False, "--llm", help="Call the LLM reviewer for every signal"),
+) -> None:
+    """Backtest the strategy + Risk Governor on historical candles (no LLM by default).
+
+    Several pairs (--pairs, or repeated --csv PAIR=PATH) trade one shared account, so
+    the Risk Governor's limits apply across the portfolio exactly as in ``zia run``.
+    """
+    from zia.backtest import run_portfolio_backtest
+    from zia.risk import RiskLimits
+
+    try:
+        settings = load_settings()
+    except ValueError as exc:
+        console.print(f"[bold red]Configuration refused:[/] {exc}")
+        raise typer.Exit(2) from exc
+    setup_logging("WARNING", settings.log_json, settings.secret_values())
+    candles_by_pair, source = _load_candles(
+        settings, pair, pairs, start, end, csv, synthetic, seed, "BACKTEST"
+    )
 
     reviewer = build_reviewer(settings) if llm else None
     result = run_portfolio_backtest(
@@ -333,6 +352,143 @@ def backtest(
     console.print(
         "[dim]Backtest results are hypothetical, depend on the stated cost assumptions and are "
         "not evidence of future profitability.[/]"
+    )
+
+
+DEFAULT_GRID = ["ema_fast=10,20", "ema_slow=50,100"]
+
+
+@app.command()
+def walkforward(
+    pair: str = typer.Option("EUR_USD", "--pair", help="Single pair"),
+    pairs: str | None = typer.Option(
+        None, "--pairs", help="Comma-separated pairs sharing one account"
+    ),
+    start: str | None = typer.Option(None, "--from", help="Start date YYYY-MM-DD (OANDA data)"),
+    end: str | None = typer.Option(None, "--to", help="End date YYYY-MM-DD"),
+    csv: list[str] | None = typer.Option(None, "--csv", help="PAIR=PATH; repeat per pair"),
+    synthetic: int = typer.Option(
+        0, "--synthetic", help="Use N seeded random-walk candles (demo only, not market data)"
+    ),
+    seed: int = typer.Option(7, "--seed"),
+    grid: list[str] | None = typer.Option(
+        None,
+        "--grid",
+        help="Strategy parameter values to search, e.g. ema_fast=10,20,30; repeat per "
+        "parameter (default: ema_fast=10,20 ema_slow=50,100)",
+    ),
+    train: int = typer.Option(2000, "--train", min=1, help="Training window, in candles"),
+    test: int = typer.Option(500, "--test", min=1, help="Test window and step, in candles"),
+    min_trades: int = typer.Option(
+        5, "--min-trades", min=0, help="Skip parameter sets with fewer training trades"
+    ),
+    workers: int = typer.Option(0, "--workers", min=0, help="Parallel processes (0 = one per CPU)"),
+    balance: float = typer.Option(10_000.0, "--balance"),
+    spread_pips: float = typer.Option(1.0, "--spread-pips", min=0),
+    slippage_pips: float = typer.Option(0.2, "--slippage-pips", min=0),
+    commission: float = typer.Option(0.0, "--commission", min=0),
+    swap_long: float = typer.Option(0.0, "--swap-long"),
+    swap_short: float = typer.Option(0.0, "--swap-short"),
+) -> None:
+    """Walk-forward optimization: grid-search strategy parameters on rolling training
+    windows, then trade each following test window with the winner (no LLM).
+
+    Only the out-of-sample test windows are reported as results.
+    """
+    import os
+
+    from zia.risk import RiskLimits
+    from zia.walkforward import parse_grid, walk_forward
+
+    try:
+        settings = load_settings()
+    except ValueError as exc:
+        console.print(f"[bold red]Configuration refused:[/] {exc}")
+        raise typer.Exit(2) from exc
+    setup_logging("WARNING", settings.log_json, settings.secret_values())
+    try:
+        search = parse_grid(grid or DEFAULT_GRID)
+    except ValueError as exc:
+        console.print(f"[bold red]{exc}[/]")
+        raise typer.Exit(2) from exc
+    candles_by_pair, source = _load_candles(
+        settings, pair, pairs, start, end, csv, synthetic, seed, "WALK-FORWARD"
+    )
+    try:
+        result = walk_forward(
+            candles_by_pair,
+            base_params=settings.strategy,
+            grid=search,
+            limits=RiskLimits.from_settings(settings, require_llm_approval=False),
+            train=train,
+            test=test,
+            min_trades=min_trades,
+            workers=workers or os.cpu_count() or 1,
+            balance=balance,
+            spread_pips=spread_pips,
+            slippage_pips=slippage_pips,
+            commission_per_100k=commission,
+            swap_long_pct=swap_long,
+            swap_short_pct=swap_short,
+            step=timedelta(seconds=GRANULARITY_SECONDS[settings.timeframe]),
+            timeframe=settings.timeframe,
+        )
+    except ValueError as exc:
+        console.print(f"[bold red]{exc}[/]")
+        raise typer.Exit(2) from exc
+
+    folds = Table(title=f"Walk-forward folds — {source}")
+    for col in (
+        "Fold",
+        "Test period",
+        "Chosen parameters",
+        "Train score",
+        "Test return",
+        "Test max DD",
+        "Test trades",
+    ):
+        folds.add_column(col, justify="right" if col.startswith(("Train", "Test ")) else "left")
+    for f in result.folds:
+        chosen = (
+            ", ".join(f"{k}={v:g}" for k, v in f.best_params.items())
+            if f.best_params
+            else f"none qualified (< {result.min_trades} trades)"
+        )
+        folds.add_row(
+            str(f.index + 1),
+            f"{f.test_start:%Y-%m-%d} -> {f.test_end:%Y-%m-%d}",
+            chosen,
+            f"{f.train_score:.2f}" if f.train_score is not None else "-",
+            f"{f.test.return_pct:+.2f}%" if f.test else "not traded",
+            f"{f.test.max_drawdown_pct:.2f}%" if f.test else "-",
+            str(f.test.trades) if f.test else "0",
+        )
+    console.print(folds)
+
+    summary = Table(title="Out-of-sample summary (test windows only)")
+    summary.add_column("Metric")
+    summary.add_column("Value", justify="right")
+    stability = "; ".join(
+        f"{name}: " + ", ".join(f"{v:g}x{n}" for v, n in counts.most_common())
+        for name, counts in result.parameter_stability().items()
+    )
+    for k, v in [
+        ("Instruments", ",".join(result.instruments)),
+        ("Windows", f"train {result.train_candles} / test {result.test_candles} candles, rolling"),
+        ("Objective", "return % / max drawdown % (drawdown floored at 1%)"),
+        ("Parameter sets per fold", str(result.folds[0].combos_tested)),
+        ("Folds traded / total", f"{len(result.traded_folds)} / {len(result.folds)}"),
+        ("Compounded OOS return", f"{result.oos_return_pct:+.2f}%"),
+        ("Worst fold drawdown", f"{result.worst_fold_drawdown_pct:.2f}%"),
+        ("OOS trades / win rate", f"{result.oos_trades} / {result.oos_win_rate:.1%}"),
+        ("Chosen values (value x folds)", stability),
+    ]:
+        summary.add_row(k, v)
+    console.print(summary)
+    console.print(
+        "[dim]Walk-forward results are hypothetical. They test the optimization process on "
+        "past data, not future profitability; parameters that change a lot between folds "
+        "suggest the edge is not stable.[/]"
     )
 
 

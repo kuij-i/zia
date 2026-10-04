@@ -153,11 +153,16 @@ def run_portfolio_backtest(
     timeframe: str = "H1",
     reviewer: Reviewer | None = None,
     journal: Journal | None = None,
+    trade_from: datetime | None = None,
 ) -> BacktestResult:
     """Replay one or more pairs through a single shared account, as ``zia run`` trades.
 
     Time advances over the union of all pairs' candle close times. A pair with no new
     candle at a step is skipped for that step (the agent's duplicate-candle guard).
+
+    Candles opening before ``trade_from`` are indicator history only: the agent does not
+    evaluate them, and the reported period, candle counts and stats start at
+    ``trade_from``. Walk-forward test windows use this for their warm-up.
     """
     if not candles_by_pair or not any(candles_by_pair.values()):
         raise ValueError("no candles to backtest")
@@ -198,6 +203,8 @@ def run_portfolio_backtest(
     rejections = dict.fromkeys(instruments, 0)
     for now in timeline:
         sim.advance_to(now)
+        if trade_from is not None and now - step < trade_from:
+            continue  # warm-up history: visible to indicators, never traded
         for outcome in agent.run_cycle(now):
             if outcome.outcome not in ("no_signal", "duplicate", "no_data"):
                 signals[outcome.instrument] += 1
@@ -218,7 +225,11 @@ def run_portfolio_backtest(
         per_pair.append(
             PairStats(
                 instrument=instrument,
-                candles=len(candles_by_pair[instrument]),
+                candles=sum(
+                    1
+                    for c in candles_by_pair[instrument]
+                    if trade_from is None or c.time >= trade_from
+                ),
                 signals=signals[instrument],
                 risk_rejections=rejections[instrument],
                 trades=len(trades),
@@ -229,7 +240,12 @@ def run_portfolio_backtest(
             )
         )
 
-    all_times = [c.time for series in candles_by_pair.values() for c in series]
+    all_times = [
+        c.time
+        for series in candles_by_pair.values()
+        for c in series
+        if trade_from is None or c.time >= trade_from
+    ] or [c.time for series in candles_by_pair.values() for c in series]
     ending = sim.get_account().nav
     wins = sum(p.wins for p in per_pair)
     losses = sum(p.losses for p in per_pair)

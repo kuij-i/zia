@@ -93,6 +93,26 @@ With several pairs, all of them trade one account: the Risk Governor's limits (m
 
 The results table lists the commission paid, the slippage cost, the swap earned or paid, and the cost of stops that gapped. The backtester reuses the same `Agent`, strategy and Risk Governor that trade live, running on `SimBroker`.
 
+## Walk-forward optimization
+
+`zia walkforward` checks whether tuning the strategy on past data would have held up on data it hadn't seen:
+
+1. Split the data into rolling windows: train on `--train` candles (default 2000), then test on the next `--test` candles (default 500), then slide forward by `--test` and repeat.
+2. On each training window, backtest every combination in the `--grid` and pick the one with the best **return % ÷ max drawdown %** (drawdown floored at 1%). Combinations with fewer than `--min-trades` trades (default 5) are skipped; if none qualify, that fold isn't traded.
+3. Trade the following test window with the chosen parameters. Only these out-of-sample test windows are reported.
+
+```bash
+zia walkforward --synthetic 3000 --train 1500 --test 500
+zia walkforward --pairs EUR_USD,USD_JPY --from 2024-01-01 \
+    --grid ema_fast=10,20,30 --grid ema_slow=50,100 --grid sl_atr_mult=1.5,2
+```
+
+- **Grid:** any strategy setting (`ema_fast`, `ema_slow`, `rsi_period`, `rsi_long_min`, `sl_atr_mult`, `tp_atr_mult`, …), repeated once per setting. Invalid combinations, such as a fast EMA that isn't faster than the slow one, are skipped. The default grid is `ema_fast=10,20 ema_slow=50,100`.
+- **Fixed during the search:** risk limits and the cost options (`--spread-pips`, `--slippage-pips`, `--commission`, `--swap-long/--swap-short`, same defaults as `zia backtest`). There is no LLM review.
+- **Warm-up:** each test window's indicators warm up on the candles just before it. Those candles are never traded.
+- **Speed:** combinations run in parallel, one process per CPU by default (`--workers`). Each fold runs one backtest per combination, so large grids get slow.
+- **Output:** a table per fold (test period, chosen parameters, training score, test return, drawdown, trades) and a summary: compounded out-of-sample return, worst fold drawdown, trades and win rate, and how often each value was chosen. If the chosen parameters change a lot from fold to fold, the edge probably isn't stable.
+
 ## Live trading
 
 Live trading is off. All three of these are required to turn it on:
