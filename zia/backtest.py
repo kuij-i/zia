@@ -31,8 +31,28 @@ from zia.risk import RiskGovernor, RiskLimits
 
 
 @dataclass(frozen=True)
-class BacktestResult:
+class PairStats:
+    """One instrument's share of a (possibly multi-pair) backtest."""
+
     instrument: str
+    candles: int
+    signals: int
+    risk_rejections: int
+    trades: int
+    wins: int
+    losses: int
+    net_pnl: float  # realized (net of costs) plus unrealized on trades still open
+    open_at_end: int
+
+    @property
+    def win_rate(self) -> float:
+        closed = self.wins + self.losses
+        return self.wins / closed if closed else 0.0
+
+
+@dataclass(frozen=True)
+class BacktestResult:
+    instrument: str  # comma-separated when several pairs share the account
     candles: int
     start: datetime | None
     end: datetime | None
@@ -59,11 +79,22 @@ class BacktestResult:
     signals: int
     risk_rejections: int
     open_at_end: int
+    per_pair: tuple[PairStats, ...] = ()
+
+    @property
+    def instruments(self) -> list[str]:
+        return self.instrument.split(",")
 
     def rows(self) -> list[tuple[str, str]]:
         return [
             ("Mode", "BACKTEST (hypothetical, not practice/live results)"),
-            ("Instrument", self.instrument),
+            ("Instruments" if len(self.instruments) > 1 else "Instrument", self.instrument),
+            (
+                "Account",
+                "one shared account; risk limits apply across all pairs"
+                if len(self.instruments) > 1
+                else "single pair",
+            ),
             (
                 "Period",
                 f"{self.start:%Y-%m-%d %H:%M} -> {self.end:%Y-%m-%d %H:%M}"
@@ -102,14 +133,18 @@ class BacktestResult:
         ]
 
 
-def run_backtest(
-    instrument: str,
-    candles: list[Candle],
+def run_backtest(instrument: str, candles: list[Candle], **kwargs) -> BacktestResult:
+    """Backtest a single pair. See ``run_portfolio_backtest`` for the options."""
+    return run_portfolio_backtest({instrument: candles}, **kwargs)
+
+
+def run_portfolio_backtest(
+    candles_by_pair: dict[str, list[Candle]],
     *,
     params: StrategyParams,
     limits: RiskLimits,
     balance: float = 10_000.0,
-    spread_pips: float = 1.0,
+    spread_pips: float | dict[str, float] = 1.0,
     slippage_pips: float = 0.0,
     commission_per_100k: float = 0.0,
     swap_long_pct: float = 0.0,
@@ -119,13 +154,21 @@ def run_backtest(
     reviewer: Reviewer | None = None,
     journal: Journal | None = None,
 ) -> BacktestResult:
+    """Replay one or more pairs through a single shared account, as ``zia run`` trades.
+
+    Time advances over the union of all pairs' candle close times. A pair with no new
+    candle at a step is skipped for that step (the agent's duplicate-candle guard).
+    """
+    if not candles_by_pair or not any(candles_by_pair.values()):
+        raise ValueError("no candles to backtest")
+    instruments = list(candles_by_pair)
     reviewer = reviewer or DisabledReviewer()
     llm_used = not isinstance(reviewer, DisabledReviewer)
     if not llm_used:
         limits = replace(limits, require_llm_approval=False)
     journal = journal or Journal(":memory:")
     sim = SimBroker(
-        {instrument: candles},
+        candles_by_pair,
         balance=balance,
         spread_pips=spread_pips,
         step=step,
@@ -141,48 +184,72 @@ def run_backtest(
         governor=RiskGovernor(limits),
         journal=journal,
         environment=TradingEnvironment.BACKTEST,
-        instruments=[instrument],
+        instruments=instruments,
         timeframe=timeframe,
         strategy_params=params,
         candle_count=params.warmup + 50,
         record_equity=False,
     )
 
+    timeline = sorted({c.time + step for series in candles_by_pair.values() for c in series})
     peak = balance
     max_dd = 0.0
-    signals = rejections = 0
-    for bar in candles:
-        now = bar.time + step
+    signals = dict.fromkeys(instruments, 0)
+    rejections = dict.fromkeys(instruments, 0)
+    for now in timeline:
         sim.advance_to(now)
         for outcome in agent.run_cycle(now):
             if outcome.outcome not in ("no_signal", "duplicate", "no_data"):
-                signals += 1
+                signals[outcome.instrument] += 1
             if outcome.outcome == "risk_rejected":
-                rejections += 1
+                rejections[outcome.instrument] += 1
         nav = sim.get_account().nav
         peak = max(peak, nav)
         max_dd = max(max_dd, (peak - nav) / peak * 100 if peak > 0 else 0.0)
 
-    closed = [t for t in sim.trades if not t.is_open]
-    open_trades = [t for t in sim.trades if t.is_open]
+    per_pair = []
+    for instrument in instruments:
+        trades = [t for t in sim.trades if t.instrument == instrument]
+        closed = [t for t in trades if not t.is_open]
+        still_open = [t for t in trades if t.is_open]
+        net = sum(t.realized_pl for t in closed) + sum(
+            sim.unrealized_pl(t) + t.swap - t.commission for t in still_open
+        )
+        per_pair.append(
+            PairStats(
+                instrument=instrument,
+                candles=len(candles_by_pair[instrument]),
+                signals=signals[instrument],
+                risk_rejections=rejections[instrument],
+                trades=len(trades),
+                wins=sum(1 for t in closed if t.realized_pl > 0),
+                losses=sum(1 for t in closed if t.realized_pl <= 0),
+                net_pnl=net,
+                open_at_end=len(still_open),
+            )
+        )
+
+    all_times = [c.time for series in candles_by_pair.values() for c in series]
     ending = sim.get_account().nav
-    wins = sum(1 for t in closed if t.realized_pl > 0)
-    losses = sum(1 for t in closed if t.realized_pl <= 0)
+    wins = sum(p.wins for p in per_pair)
+    losses = sum(p.losses for p in per_pair)
     return BacktestResult(
-        instrument=instrument,
-        candles=len(candles),
-        start=candles[0].time if candles else None,
-        end=candles[-1].time if candles else None,
+        instrument=",".join(instruments),
+        candles=sum(p.candles for p in per_pair),
+        start=min(all_times),
+        end=max(all_times),
         trades=len(sim.trades),
         wins=wins,
         losses=losses,
-        win_rate=wins / len(closed) if closed else 0.0,
+        win_rate=wins / (wins + losses) if wins + losses else 0.0,
         net_pnl=ending - balance,
         return_pct=(ending - balance) / balance * 100,
         max_drawdown_pct=max_dd,
         starting_balance=balance,
         ending_equity=ending,
-        spread_pips=spread_pips,
+        spread_pips=spread_pips
+        if isinstance(spread_pips, int | float)
+        else max(spread_pips.values()),
         slippage_pips=slippage_pips,
         commission_per_100k=commission_per_100k,
         total_commission=sum(t.commission for t in sim.trades),
@@ -193,7 +260,8 @@ def run_backtest(
         gapped_stops=sum(t.exit_reason == "stop_loss_gap" for t in sim.trades),
         total_gap_cost=sum(t.gap_cost for t in sim.trades),
         llm_used=llm_used,
-        signals=signals,
-        risk_rejections=rejections,
-        open_at_end=len(open_trades),
+        signals=sum(signals.values()),
+        risk_rejections=sum(rejections.values()),
+        open_at_end=sum(p.open_at_end for p in per_pair),
+        per_pair=tuple(per_pair),
     )

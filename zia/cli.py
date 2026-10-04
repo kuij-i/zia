@@ -163,12 +163,48 @@ def run(
         journal.close()
 
 
+SYNTHETIC_START_PRICES = {"GBP_USD": 1.27}
+
+
+def _parse_pairs(pair: str, pairs: str | None) -> list[str]:
+    from zia import instruments as inst
+
+    items = [p.strip().upper() for p in (pairs or pair).split(",") if p.strip()]
+    for item in items:
+        inst.split(item)  # raises ValueError for malformed names
+    if len(set(items)) != len(items):
+        raise ValueError("duplicate pair in --pairs")
+    return items
+
+
+def _parse_csv_args(csv: list[str], pairs: list[str]) -> dict[str, Path]:
+    """Map pairs to CSV paths from repeated ``--csv PAIR=PATH`` (or one bare PATH)."""
+    out: dict[str, Path] = {}
+    for item in csv:
+        if "=" in item:
+            name, path = item.split("=", 1)
+            name = name.strip().upper()
+        elif len(csv) == 1 and len(pairs) == 1:
+            name, path = pairs[0], item
+        else:
+            raise ValueError(f"use --csv PAIR=PATH when backtesting several pairs (got {item!r})")
+        if name in out:
+            raise ValueError(f"two CSV files given for {name}")
+        out[name] = Path(path)
+    return out
+
+
 @app.command()
 def backtest(
-    pair: str = typer.Option("EUR_USD", "--pair"),
+    pair: str = typer.Option("EUR_USD", "--pair", help="Single pair to backtest"),
+    pairs: str | None = typer.Option(
+        None, "--pairs", help="Comma-separated pairs sharing one account, e.g. EUR_USD,USD_JPY"
+    ),
     start: str | None = typer.Option(None, "--from", help="Start date YYYY-MM-DD (OANDA data)"),
     end: str | None = typer.Option(None, "--to", help="End date YYYY-MM-DD"),
-    csv: Path | None = typer.Option(None, "--csv", help="CSV with time,open,high,low,close"),
+    csv: list[str] | None = typer.Option(
+        None, "--csv", help="CSV (time,open,high,low,close) as PAIR=PATH; repeat per pair"
+    ),
     synthetic: int = typer.Option(
         0, "--synthetic", help="Use N seeded random-walk candles (demo only, not market data)"
     ),
@@ -189,9 +225,13 @@ def backtest(
     ),
     llm: bool = typer.Option(False, "--llm", help="Call the LLM reviewer for every signal"),
 ) -> None:
-    """Backtest the strategy + Risk Governor on historical candles (no LLM by default)."""
+    """Backtest the strategy + Risk Governor on historical candles (no LLM by default).
+
+    Several pairs (--pairs, or repeated --csv PAIR=PATH) trade one shared account, so
+    the Risk Governor's limits apply across the portfolio exactly as in ``zia run``.
+    """
     from zia import data
-    from zia.backtest import run_backtest
+    from zia.backtest import run_portfolio_backtest
     from zia.risk import RiskLimits
 
     try:
@@ -200,17 +240,32 @@ def backtest(
         console.print(f"[bold red]Configuration refused:[/] {exc}")
         raise typer.Exit(2) from exc
     setup_logging("WARNING", settings.log_json, settings.secret_values())
-    pair = pair.upper()
+    try:
+        pair_list = _parse_pairs(pair, pairs)
+        csv_paths = _parse_csv_args(csv or [], pair_list)
+    except ValueError as exc:
+        console.print(f"[bold red]{exc}[/]")
+        raise typer.Exit(2) from exc
+    if csv_paths and pairs is None:
+        pair_list = list(csv_paths)  # the CSV arguments name the pairs
     console.print("[bold black on cyan] MODE: BACKTEST (simulated, hypothetical) [/]")
 
+    candles_by_pair: dict[str, list] = {}
     if synthetic:
-        candles = data.synthetic_candles(
-            synthetic, start_price=150.0 if pair.endswith("JPY") else 1.10, seed=seed
-        )
+        for i, p in enumerate(pair_list):
+            start_price = 150.0 if p.endswith("JPY") else SYNTHETIC_START_PRICES.get(p, 1.10)
+            candles_by_pair[p] = data.synthetic_candles(
+                synthetic, start_price=start_price, seed=seed + i
+            )
         source = f"SYNTHETIC random walk (seed={seed}) — not market data"
-    elif csv:
-        candles = data.load_csv(csv)
-        source = f"CSV {csv}"
+    elif csv_paths:
+        missing = [p for p in pair_list if p not in csv_paths]
+        if missing:
+            console.print(f"[bold red]No --csv given for {', '.join(missing)}[/]")
+            raise typer.Exit(2)
+        for p in pair_list:
+            candles_by_pair[p] = data.load_csv(csv_paths[p])
+        source = "CSV " + ", ".join(f"{p}={csv_paths[p]}" for p in pair_list)
     elif start:
         try:
             env = resolve_environment(settings)
@@ -225,22 +280,23 @@ def backtest(
         s = datetime.fromisoformat(start).replace(tzinfo=UTC)
         e = datetime.fromisoformat(end).replace(tzinfo=UTC) if end else None
         try:
-            candles = broker.get_candles_range(pair, settings.timeframe, s, e)
+            for p in pair_list:
+                candles_by_pair[p] = broker.get_candles_range(p, settings.timeframe, s, e)
         finally:
             broker.close()
         source = f"OANDA {env.value} historical candles"
     else:
-        console.print("Provide --from (OANDA), --csv PATH or --synthetic N.")
+        console.print("Provide --from (OANDA), --csv PAIR=PATH or --synthetic N.")
         raise typer.Exit(2)
 
-    if not candles:
-        console.print("No candles loaded.")
+    empty = [p for p, c in candles_by_pair.items() if not c]
+    if empty:
+        console.print(f"No candles loaded for {', '.join(empty)}.")
         raise typer.Exit(1)
 
     reviewer = build_reviewer(settings) if llm else None
-    result = run_backtest(
-        pair,
-        candles,
+    result = run_portfolio_backtest(
+        candles_by_pair,
         params=settings.strategy,
         limits=RiskLimits.from_settings(settings, require_llm_approval=llm),
         balance=balance,
@@ -259,6 +315,21 @@ def backtest(
     for k, v in result.rows():
         table.add_row(k, v)
     console.print(table)
+    if len(result.per_pair) > 1:
+        by_pair = Table(title="Per pair (shared account)")
+        for col in ("Pair", "Signals", "Risk rej.", "Trades", "Win rate", "Net P&L", "Open"):
+            by_pair.add_column(col, justify="left" if col == "Pair" else "right")
+        for ps in result.per_pair:
+            by_pair.add_row(
+                ps.instrument,
+                str(ps.signals),
+                str(ps.risk_rejections),
+                str(ps.trades),
+                f"{ps.win_rate:.1%}",
+                f"{ps.net_pnl:,.2f}",
+                str(ps.open_at_end),
+            )
+        console.print(by_pair)
     console.print(
         "[dim]Backtest results are hypothetical, depend on the stated cost assumptions and are "
         "not evidence of future profitability.[/]"

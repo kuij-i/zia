@@ -181,6 +181,10 @@ class SimBroker(Broker):
             raise BrokerError(f"cannot convert {instrument} P&L to {self.currency}")
         return quote_amount * rate
 
+    def unrealized_pl(self, t: SimTrade) -> float:
+        """Mark-to-market P&L of an open trade at the last visible close, account currency."""
+        return self._unrealized(t)
+
     def _unrealized(self, t: SimTrade) -> float:
         bars = self.visible(t.instrument)
         if not bars:
