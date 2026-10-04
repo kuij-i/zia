@@ -12,7 +12,10 @@ Costs:
 - Swap/financing: annual % of notional, separate for long and short (negative = paid),
   applied at each 17:00 New York rollover a trade is open through. Wednesday's rollover
   counts three days (covering the weekend); there is none on Saturday or Sunday.
-Gaps through stops and changes in financing rates over time are not modelled.
+- Gaps: if a candle opens beyond a stop-loss (e.g. after a weekend), the stop fills at
+  that worse opening price (plus slippage), not at the stop price. Take-profits that gap
+  still fill at their limit price, so gaps can only hurt results (conservative).
+Changes in financing rates over time are not modelled.
 """
 
 from __future__ import annotations
@@ -76,6 +79,7 @@ class SimTrade:
     commission: float = 0.0  # entry + exit, account currency
     slippage_cost: float = 0.0  # entry + exit, account currency
     swap: float = 0.0  # financing so far, account currency (positive = earned)
+    gap_cost: float = 0.0  # extra loss from a stop filling past its price, account currency
 
     @property
     def is_open(self) -> bool:
@@ -281,16 +285,29 @@ class SimBroker(Broker):
                 continue
             if t.side is Side.BUY:
                 # Long exits on the bid.
-                if bar.low - half <= t.stop_loss:
+                open_bid = bar.open - half
+                if open_bid <= t.stop_loss:  # gapped through the stop
+                    self._gap_close(t, open_bid, bar.time)
+                elif bar.low - half <= t.stop_loss:
                     self._close(t, t.stop_loss, bar.time, "stop_loss", slipped=True)
                 elif bar.high - half >= t.take_profit:
                     self._close(t, t.take_profit, bar.time, "take_profit")
             else:
                 # Short exits on the ask.
-                if bar.high + half >= t.stop_loss:
+                open_ask = bar.open + half
+                if open_ask >= t.stop_loss:  # gapped through the stop
+                    self._gap_close(t, open_ask, bar.time)
+                elif bar.high + half >= t.stop_loss:
                     self._close(t, t.stop_loss, bar.time, "stop_loss", slipped=True)
                 elif bar.low + half <= t.take_profit:
                     self._close(t, t.take_profit, bar.time, "take_profit")
+
+    def _gap_close(self, t: SimTrade, open_price: float, when: datetime) -> None:
+        """Stop-loss triggered by a gap: fill at the (worse) opening price."""
+        t.gap_cost = self._to_account(
+            t.instrument, abs(open_price - t.stop_loss) * t.units, open_price
+        )
+        self._close(t, open_price, when, "stop_loss_gap", slipped=True)
 
     def _close(
         self, t: SimTrade, price: float, when: datetime, reason: str, *, slipped: bool = False
