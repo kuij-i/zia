@@ -66,6 +66,7 @@ zia close-all           # close every open position (asks for confirmation)
 
 zia backtest --synthetic 3000                       # offline demo on seeded random-walk data (NOT market data)
 zia backtest --synthetic 3000 --slippage-pips 0.5 --commission 3.5   # with explicit trading costs
+zia backtest --synthetic 3000 --swap-long -2.5 --swap-short 0.8        # with financing (annual %)
 zia backtest --pair EUR_USD --from 2025-01-01       # OANDA historical candles (needs credentials)
 zia backtest --pair USD_JPY --csv data.csv          # CSV: time,open,high,low,close[,volume]
 zia backtest --pair EUR_USD --from 2025-01-01 --llm # also call the LLM reviewer per signal (costs API calls)
@@ -78,10 +79,11 @@ trades stop immediately. Existing positions keep their broker-side stop-loss and
 - **Spread** (`--spread-pips`, default 1.0): buys fill at the ask, sells at the bid, and exits trigger on the opposite side.
 - **Slippage** (`--slippage-pips`, default 0.2): a fixed number of pips against you on market entries, manual closes and stop-loss exits. Take-profits are limit orders and fill at their price.
 - **Commission** (`--commission`, default 0): charged in account currency per 100k units on entry and again on exit. OANDA's standard pricing is spread-only, so set this for commission-based accounts.
-- **Not modelled:** swap/financing and price gaps through stops. If a single candle touches both the stop-loss and the take-profit, the stop-loss is assumed to fill first.
+- **Swap/financing** (`--swap-long`, `--swap-short`, default 0): annual % of notional for long and short positions; negative means you pay. Charged at each 5pm New York rollover a trade is held through, three days on Wednesday to cover the weekend, and none on Saturday or Sunday. Real rates change with interest-rate policy, so take current rates from your broker.
+- **Not modelled:** price gaps through stops, and financing rates changing over the backtest period. If a single candle touches both the stop-loss and the take-profit, the stop-loss is assumed to fill first.
 - **Sizing:** position sizing ignores these costs, as it does in live trading. A stopped-out trade therefore loses slightly more than the 1% risk budget.
 
-The results table lists the commission paid and the slippage cost. The backtester reuses the same `Agent`, strategy and Risk Governor that trade live, running on `SimBroker`.
+The results table lists the commission paid, the slippage cost and the swap earned or paid. The backtester reuses the same `Agent`, strategy and Risk Governor that trade live, running on `SimBroker`.
 
 ## Live trading
 

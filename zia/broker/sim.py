@@ -9,15 +9,20 @@ Costs:
 - Slippage: a fixed number of pips *against* the trader on market fills (entries, manual
   closes) and stop-loss exits. Take-profit exits are limit orders and fill at their price.
 - Commission: charged per 100k units on each side (entry and exit), in account currency.
-Swap/financing and gaps through stops are not modelled.
+- Swap/financing: annual % of notional, separate for long and short (negative = paid),
+  applied at each 17:00 New York rollover a trade is open through. Wednesday's rollover
+  counts three days (covering the weekend); there is none on Saturday or Sunday.
+Gaps through stops and changes in financing rates over time are not modelled.
 """
 
 from __future__ import annotations
 
+import bisect
 import itertools
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from zia import instruments as inst
 from zia.broker.base import Broker, BrokerError, check_order_protection
@@ -32,6 +37,26 @@ from zia.models import (
     TradeInfo,
     TradingEnvironment,
 )
+
+NEW_YORK = ZoneInfo("America/New_York")
+ROLLOVER_TIME = time(17, 0)
+
+
+def rollovers_between(start: datetime, end: datetime) -> list[tuple[datetime, int]]:
+    """FX rollovers in (start, end] as (UTC instant, days financed).
+
+    Rollover is 17:00 New York on weekdays; Wednesday covers three days (the weekend).
+    """
+    out = []
+    day = start.astimezone(NEW_YORK).date()
+    last = end.astimezone(NEW_YORK).date()
+    while day <= last:
+        if day.weekday() < 5:
+            instant = datetime.combine(day, ROLLOVER_TIME, NEW_YORK).astimezone(UTC)
+            if start < instant <= end:
+                out.append((instant, 3 if day.weekday() == 2 else 1))
+        day += timedelta(days=1)
+    return out
 
 
 @dataclass
@@ -50,6 +75,7 @@ class SimTrade:
     exit_reason: str | None = None
     commission: float = 0.0  # entry + exit, account currency
     slippage_cost: float = 0.0  # entry + exit, account currency
+    swap: float = 0.0  # financing so far, account currency (positive = earned)
 
     @property
     def is_open(self) -> bool:
@@ -73,6 +99,8 @@ class SimBroker(Broker):
         step: timedelta = timedelta(hours=1),
         slippage_pips: float = 0.0,
         commission_per_100k: float = 0.0,
+        swap_long_pct: float = 0.0,
+        swap_short_pct: float = 0.0,
     ) -> None:
         if slippage_pips < 0 or commission_per_100k < 0:
             raise ValueError("slippage and commission must be non-negative")
@@ -86,6 +114,9 @@ class SimBroker(Broker):
         self.margin_rate = margin_rate
         self.slippage_pips = slippage_pips
         self.commission_per_100k = commission_per_100k
+        self.swap_long_pct = swap_long_pct
+        self.swap_short_pct = swap_short_pct
+        self._financed_until: datetime | None = None
         self.trades: list[SimTrade] = []
         self._ids = itertools.count(1)
         self.fail_next_order: str | None = None  # inject a broker failure in tests
@@ -102,6 +133,7 @@ class SimBroker(Broker):
                 idx += 1
                 self._cursor[instrument] = idx
                 self._settle(instrument, series[idx])
+        self._apply_financing(when)
 
     def visible(self, instrument: str) -> list[Candle]:
         return self._candles[instrument][: self._cursor[instrument] + 1]
@@ -274,4 +306,33 @@ class SimBroker(Broker):
         # Entry commission was already taken from the balance when the trade opened.
         self.balance += gross - exit_commission
         t.close_price, t.close_time, t.exit_reason = price, when, reason
-        t.realized_pl = gross - t.commission
+        t.realized_pl = gross - t.commission + t.swap
+
+    def _mark_at(self, instrument: str, instant: datetime, fallback: float) -> float:
+        """Close of the last candle completed by ``instant``."""
+        series = self._candles[instrument]
+        times = [c.time + self.step for c in series]
+        i = bisect.bisect_right(times, instant) - 1
+        return series[i].close if i >= 0 else fallback
+
+    def _apply_financing(self, when: datetime) -> None:
+        if self._financed_until is None:
+            self._financed_until = when
+            return
+        if not (self.swap_long_pct or self.swap_short_pct):
+            self._financed_until = when
+            return
+        for instant, days in rollovers_between(self._financed_until, when):
+            for t in self.trades:
+                held = t.open_time < instant and (t.close_time is None or t.close_time > instant)
+                if not held:
+                    continue
+                pct = self.swap_long_pct if t.side is Side.BUY else self.swap_short_pct
+                px = self._mark_at(t.instrument, instant, t.open_price)
+                notional = self._to_account(t.instrument, px * t.units, px)
+                amount = notional * pct / 100 / 365 * days
+                t.swap += amount
+                self.balance += amount
+                if not t.is_open:  # closed later in this same advance: book into its P&L
+                    t.realized_pl += amount
+        self._financed_until = when
