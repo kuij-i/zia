@@ -70,6 +70,11 @@ zia backtest --synthetic 3000 --swap-long -2.5 --swap-short 0.8        # with fi
 zia backtest --pair EUR_USD --from 2025-01-01       # OANDA historical candles (needs credentials)
 zia backtest --pair USD_JPY --csv data.csv          # CSV: time,open,high,low,close[,volume]
 zia backtest --pair EUR_USD --from 2025-01-01 --llm # also call the LLM reviewer per signal (costs API calls)
+
+# Several pairs on one shared account (risk limits apply across the portfolio, as in `zia run`)
+zia backtest --pairs EUR_USD,GBP_USD,USD_JPY --from 2025-01-01
+zia backtest --csv EUR_USD=eur.csv --csv USD_JPY=jpy.csv
+zia backtest --pairs EUR_USD,GBP_USD,USD_JPY --synthetic 3000
 ```
 
 **Kill switch:** create a file named `ZIA_KILL` in the working directory, or set `ZIA_KILL_SWITCH=true`. New
@@ -83,6 +88,8 @@ trades stop immediately. Existing positions keep their broker-side stop-loss and
 - **Gaps:** if a candle opens beyond a stop-loss (common after weekends or news), the stop fills at that worse opening price plus slippage. Take-profits that gap still fill at their limit price, so gaps can only hurt results. The results table shows how many stops gapped and what the gaps cost.
 - **Not modelled:** financing rates changing over the backtest period. If a single candle touches both the stop-loss and the take-profit, the stop-loss is assumed to fill first.
 - **Sizing:** position sizing ignores these costs, as it does in live trading. A stopped-out trade therefore loses slightly more than the 1% risk budget.
+
+With several pairs, all of them trade one account: the Risk Governor's limits (max open trades, daily loss, drawdown, margin, one position per pair) apply across the portfolio, and a second table breaks results down per pair. Pairs may cover different date ranges; each is evaluated only when it has a new completed candle.
 
 The results table lists the commission paid, the slippage cost, the swap earned or paid, and the cost of stops that gapped. The backtester reuses the same `Agent`, strategy and Risk Governor that trade live, running on `SimBroker`.
 
