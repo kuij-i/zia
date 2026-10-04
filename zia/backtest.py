@@ -1,14 +1,19 @@
 """Offline backtest: replays historical candles through the *same* Agent, strategy and
 Risk Governor, executing on the SimBroker.
 
-Assumptions (explicit): fills at candle close +/- half a fixed spread; a fixed slippage
-in pips against the trader on entries and stop-loss exits (take-profits fill at their
-limit price); commission per 100k units on each side; swap/financing at annual long/short
-rates applied at each 17:00 New York rollover (Wednesday x3, none at weekends); stop-loss
-assumed to fill before take-profit when both are touched within one candle; open trades
-are marked to the final close (exit costs not yet charged). Position sizing ignores these
-costs, exactly as in live trading. Results are hypothetical and say nothing about future
-performance.
+Assumptions (explicit):
+- Fills at candle close +/- half a fixed spread.
+- Fixed slippage in pips against the trader on entries and stop-loss exits; take-profits
+  fill at their limit price.
+- A stop gapped through at a candle's open fills at that (worse) open.
+- Commission per 100k units on each side.
+- Swap/financing at annual long/short rates, applied at each 17:00 New York rollover
+  (Wednesday x3, none at weekends).
+- Stop-loss assumed to fill before take-profit when both are touched within one candle.
+- Open trades are marked to the final close (exit costs not yet charged).
+- Position sizing ignores these costs, exactly as in live trading.
+
+Results are hypothetical and say nothing about future performance.
 """
 
 from __future__ import annotations
@@ -48,6 +53,8 @@ class BacktestResult:
     swap_long_pct: float
     swap_short_pct: float
     total_swap: float
+    gapped_stops: int
+    total_gap_cost: float
     llm_used: bool
     signals: int
     risk_rejections: int
@@ -87,7 +94,9 @@ class BacktestResult:
                 "17:00 New York rollover, Wed x3",
             ),
             ("Swap earned (+) / paid (-)", f"{self.total_swap:+,.2f}"),
-            ("Not modelled", "gaps through stops, financing-rate changes"),
+            ("Stops gapped through", str(self.gapped_stops)),
+            ("Gap cost", f"{self.total_gap_cost:,.2f}"),
+            ("Not modelled", "financing-rate changes"),
             ("LLM review", "on" if self.llm_used else "off"),
             ("Open at end (marked to close)", str(self.open_at_end)),
         ]
@@ -181,6 +190,8 @@ def run_backtest(
         swap_long_pct=swap_long_pct,
         swap_short_pct=swap_short_pct,
         total_swap=sum(t.swap for t in sim.trades),
+        gapped_stops=sum(t.exit_reason == "stop_loss_gap" for t in sim.trades),
+        total_gap_cost=sum(t.gap_cost for t in sim.trades),
         llm_used=llm_used,
         signals=signals,
         risk_rejections=rejections,

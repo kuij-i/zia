@@ -80,10 +80,11 @@ trades stop immediately. Existing positions keep their broker-side stop-loss and
 - **Slippage** (`--slippage-pips`, default 0.2): a fixed number of pips against you on market entries, manual closes and stop-loss exits. Take-profits are limit orders and fill at their price.
 - **Commission** (`--commission`, default 0): charged in account currency per 100k units on entry and again on exit. OANDA's standard pricing is spread-only, so set this for commission-based accounts.
 - **Swap/financing** (`--swap-long`, `--swap-short`, default 0): annual % of notional for long and short positions; negative means you pay. Charged at each 5pm New York rollover a trade is held through, three days on Wednesday to cover the weekend, and none on Saturday or Sunday. Real rates change with interest-rate policy, so take current rates from your broker.
-- **Not modelled:** price gaps through stops, and financing rates changing over the backtest period. If a single candle touches both the stop-loss and the take-profit, the stop-loss is assumed to fill first.
+- **Gaps:** if a candle opens beyond a stop-loss (common after weekends or news), the stop fills at that worse opening price plus slippage. Take-profits that gap still fill at their limit price, so gaps can only hurt results. The results table shows how many stops gapped and what the gaps cost.
+- **Not modelled:** financing rates changing over the backtest period. If a single candle touches both the stop-loss and the take-profit, the stop-loss is assumed to fill first.
 - **Sizing:** position sizing ignores these costs, as it does in live trading. A stopped-out trade therefore loses slightly more than the 1% risk budget.
 
-The results table lists the commission paid, the slippage cost and the swap earned or paid. The backtester reuses the same `Agent`, strategy and Risk Governor that trade live, running on `SimBroker`.
+The results table lists the commission paid, the slippage cost, the swap earned or paid, and the cost of stops that gapped. The backtester reuses the same `Agent`, strategy and Risk Governor that trade live, running on `SimBroker`.
 
 ## Live trading
 
